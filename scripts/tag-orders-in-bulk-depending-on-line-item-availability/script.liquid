@@ -1,0 +1,295 @@
+{% comment %}
+  MARK: EVENT SUBSCRIPTIONS
+  mechanic/user/trigger
+  mechanic/scheduler/daily
+  user/scheduler/midday
+{% endcomment %}
+
+{% comment %}
+  MARK: OPTIONS ARRANGEMENT
+  {{ options.location_id__number_required }}
+  {{ options.search_query_for_orders }}
+  {{ options.ignore_orders_with_these_tags__array }}
+  {{ options.sku_exceptions__array }}
+{% endcomment %}
+
+{% # Scheduler for midday; don't need scheduler for daily because this is already subscribed. %}
+{% if event.topic contains 'mechanic/scheduler/daily' %}
+  {% action "event" %}
+    {
+      "topic": "user/scheduler/midday",
+      "task_id": {{ task.id | json }},
+      "run_at": {{ 'now' | date: '%s' | plus: 43200 | json }},
+      "data": {
+        "why": "because we need it bi-daily"
+      }
+    }
+  {% endaction %}
+{% endif %}
+
+{% # Ugly but necessary query; loops through orders and builds the order_ids pile. %}
+{% assign cursor = nil %}
+{% assign order_ids = array %}
+
+{% for n in (0..100) %}
+  {% capture query %}
+    query {
+      orders(
+        first: 250
+        query: {{ options.search_query_for_orders | default: "" | json }}
+        after: {{ cursor | json }}
+      ) {
+        pageInfo {
+          hasNextPage
+        }
+        edges {
+          cursor
+          node {
+            id
+            tags
+            closedAt
+            cancelledAt
+          }
+        }
+      }
+    }
+  {% endcapture %}
+
+  {% assign result = query | shopify %}
+
+  {% for edge in result.data.orders.edges %}
+
+    {% assign ignore_order = nil %}
+    {% for tag in edge.node.tags %}
+      {% for ignore_tag in options.ignore_orders_with_these_tags__array %}
+        {% if tag contains ignore_tag %}
+          {% assign ignore_order = true %}
+        {% endif %}
+      {% endfor %}
+    {% endfor %}
+
+    {% if edge.node.cancelledAt != null or edge.node.closedAt != null %}
+      {% assign ignore_order = true %}
+    {% endif %}
+
+    {% if ignore_order %}
+      {% continue %}
+    {% endif %}
+
+    {% assign order_ids[order_ids.size] = edge.node.id %}
+  {% endfor %}
+
+  {% if result.data.orders.pageInfo.hasNextPage %}
+    {% assign cursor = result.data.orders.edges.last.cursor %}
+  {% else %}
+    {% break %}
+  {% endif %}
+{% endfor %}
+
+{% # Initializes the temporary record of on-hand quantities. %}
+{% assign record = hash %}
+
+{% # Loops through orders in the order_ids pile, and decides what to tag the order. %}
+{% for order_id in order_ids %}
+  {% # Another ugly but necessary query; this time zoomed-in to each order. %}
+  {% capture query %}
+    query {
+      order(id: {{ order_id | json }}) {
+        name
+        tags
+        customAttributes {
+          key
+          value
+        }  
+        lineItems(first: 150) {
+          edges {
+            node {
+              sku
+              unfulfilledQuantity
+              product {
+                tags
+              }
+              variant {
+                id
+                inventoryItem {
+                  inventoryLevel(locationId: "gid://shopify/Location/{{ options.location_id__number_required }}") {
+                    quantities(names: "on_hand") {
+                      name
+                      quantity
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }      
+  {% endcapture %}
+
+  {% assign result = query | shopify %}
+  {% assign order = result.data.order %}
+
+  {% # Initializes the new_attributes array. %}
+  {% assign new_attributes = array %}
+
+  {% # Preserves old attributes 'locksmith', 'sra', 'tier', and 'other'. %}
+  {% for attribute in order.customAttributes %}
+    {% if attribute.key contains 'locksmith' or attribute.key contains 'sra' or attribute.key contains 'tier' or attribute.key contains 'other' %}
+      {% assign new_attribute = hash %}
+      {% assign new_attribute["key"] = attribute.key %}
+      {% assign new_attribute["value"] = attribute.value %}
+      {% assign new_attributes[new_attributes.size] = new_attribute %}
+    {% endif %}
+  {% endfor %}
+
+  {% # Nils out the has_ variables so the previous values don't affect the current order info. %}
+  {% assign has_ispo = nil %}
+  {% assign has_is = nil %}
+  {% assign has_po = nil %}
+  {% assign has_spo = nil %}
+
+  {% # Loops through line items. %}
+  {% for lineItemEdge in order.lineItems.edges %}
+
+    {% # Just a shorthand, to make things easier. %}
+    {% assign lineItem = lineItemEdge.node %}
+
+    {% # Skip anything that doesn't have an id. %}
+    {% unless lineItem.variant.id %}
+      {% continue %}
+    {% endunless %}
+
+    {% # Exceptions logic. %}
+    {% assign exception = nil %}
+    {% assign exceptions = options.sku_exceptions__array %}
+
+    {% if exceptions != blank %}
+      {% for entry in exceptions %}
+        {% if lineItem.sku contains entry %}
+          {% assign exception = true %}
+          {% break %}
+        {% endif %}
+      {% endfor %}
+
+      {% if exception %}
+        {% continue %}
+      {% endif %}
+    {% endif %}
+
+    {% # Main ISPO logic. %}
+    {% if lineItem.unfulfilledQuantity > 0 %}
+
+      {% # More shorthand. %}
+      {% assign lineQuantities = lineItem.variant.inventoryItem.inventoryLevel.quantities %}
+
+      {% # Gets onHand for this lineItem. %}
+      {% for lineQuantity in lineQuantities %}
+        {% assign onHand = lineQuantity.quantity %}
+      {% endfor %}
+
+      {% # Adds an entry to the record, initialized up there ↑ %}
+      {% assign recordVariant = lineItem.variant.id | remove: 'gid://shopify/ProductVariant/' %}
+
+      {% unless record[recordVariant] %}
+        {% assign record[recordVariant] = onHand %}
+      {% endunless %}
+
+      {% # Builds the new attributes to put on the order; will contain information about on-hand quantity. %}
+      {% assign new_attribute = hash %}
+      {% assign new_attribute["key"] = lineItem.sku %}
+      {% assign new_attribute["value"] = record[recordVariant] | append: "" %}
+      {% if new_attribute["key"] != nil %}
+        {% assign new_attributes[new_attributes.size] = new_attribute %}
+      {% endif %}
+
+      {% # Checks and assigns the has_ variables; this is the logic used to tell what to tag the order. %}
+      {% assign onHandLeft = record[recordVariant] %}
+      {% if onHandLeft > 0 and onHandLeft < lineItem.unfulfilledQuantity %}
+        {% assign has_ispo = true %}
+        {% assign record[recordVariant] = onHandLeft | minus: lineItem.unfulfilledQuantity %}
+      {% elsif onHandLeft > 0 %}
+        {% assign has_is = true %}
+        {% assign record[recordVariant] = onHandLeft | minus: lineItem.unfulfilledQuantity %}
+      {% else %}
+        {% assign has_po = true %}
+        {% if lineItem.product.tags contains 'Special PO' %}
+          {% assign has_spo = true %}
+        {% endif %}
+      {% endif %}
+
+    {% endif %}
+  {% endfor %} {% # End of lineItem loop. %}
+
+  {% # Determines based on has_ variables what to tag the order. %}
+  {% assign tags_to_add = array %}
+
+  {% if has_ispo %}
+    {% assign tags_to_add[tags_to_add.size] = 'ISPO' %}
+  {% elsif has_is and has_po %}
+    {% assign tags_to_add[tags_to_add.size] = 'ISPO' %}
+  {% elsif has_is %}
+    {% assign tags_to_add[tags_to_add.size] = 'In Stock' %}
+  {% elsif has_po %}
+    {% assign tags_to_add[tags_to_add.size] = 'Pre-Order' %}
+  {% endif %}
+
+  {% if has_spo %}
+    {% assign tags_to_add[tags_to_add.size] = 'Special PO' %}
+  {% endif %}
+
+  {% # Manages the endlog entries for troubleshooting purposes. %}
+  {% assign endlog = endlog | append: order.name | append: ': ' | append: tags_to_add | append: newline %}
+  {% assign endlog = endlog | append: order.name | append: ': ' | append: new_attributes | append: newline %}
+
+  {% # ACTION: Strip all availability tags. %}
+  {% action "shopify" %}
+    mutation {
+      tagsRemove(
+        id: {{ order_id | json }}
+        tags: ["ISPO", "In Stock", "Pre-Order", "Special PO"]
+      ) {
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  {% endaction %}
+
+  {% # ACTION: Selectively add the appropriate tags. %}
+  {% action "shopify" %}
+    mutation {
+      tagsAdd(
+        id: {{ order_id | json }}
+        tags: {{ tags_to_add | json }}
+      ) {
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  {% endaction %}
+
+  {% # ACTION: Write the new attributes. %}
+  {% action "shopify" %}
+    mutation {
+      orderUpdate(
+        input: {
+          id: {{ order_id | json }},
+          customAttributes: {{ new_attributes | graphql_arguments }}
+        }
+      ) {
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  {% endaction %}
+{% endfor %} {% # End of order_ids loop. %}
+
+{% # Logs for troubleshooting. %}
+{% log record %}
+{% log endlog %}
