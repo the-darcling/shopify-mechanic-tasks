@@ -12,8 +12,4 @@ Every midnight and midday, this task will automatically go through all unfulfill
   user/scheduler/midday
 ```
 
-[Lightward's Mechanic event subscriptions documentation](https://learn.mechanic.dev/core/tasks/subscriptions)
-
-## Documentation
-
-Every midnight and midday, this task will automatically go through all unfulfilled and partially fulfilled orders, from oldest to newest, and determine if each order should be tagged In Stock, Pre-Order, or ISPO (a combination of both).
+[Read Lightward's Mechanic event subscriptions documentation](https://learn.mechanic.dev/core/tasks/subscriptions)

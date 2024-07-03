@@ -1,0 +1,170 @@
+{% comment %}
+  
+  on order create...
+
+{% endcomment %}
+
+{% if event.preview %}
+  {% capture result_json %}
+  {
+    "data": {
+      "order": {
+        "lineItems": {
+          "edges": [
+            {
+              "node": {
+                "sku": "TEST-E",
+                "quantity": 2,
+                "variant": {
+                  "inventoryItem": {
+                    "inventoryLevel": {
+                      "quantities": [
+                        {
+                          "name": "available",
+                          "quantity": -1
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "node": {
+                "sku": "TEST-F",
+                "quantity": 1,
+                "variant": {
+                  "inventoryItem": {
+                    "inventoryLevel": {
+                      "quantities": [
+                        {
+                          "name": "available",
+                          "quantity": -3
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "node": {
+                "sku": "EP-SET-WCTOTRF",
+                "quantity": 1,
+                "variant": {
+                  "inventoryItem": {
+                    "inventoryLevel": {
+                      "quantities": [
+                        {
+                          "name": "available",
+                          "quantity": 0
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "extensions": {
+      "cost": {
+        "requestedQueryCost": 53,
+        "actualQueryCost": 18,
+        "throttleStatus": {
+          "maximumAvailable": 10000.0,
+          "currentlyAvailable": 9982,
+          "restoreRate": 500.0
+        }
+      }
+    }
+  }  
+  {% endcapture %}
+  {% assign result = result_json | parse_json %}
+
+{% else %}
+  {% capture query %}
+  query {
+    order(id: {{ order.admin_graphql_api_id | json }}) {
+      lineItems(first: 100) {
+        edges {
+          node {
+            sku
+            quantity
+            variant {
+              inventoryItem {
+                inventoryLevel(locationId: "gid://shopify/Location/16259383396") {
+                  quantities(names: ["available"]) {
+                    name
+                    quantity
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  {% endcapture %}
+  {% assign result = query | shopify %}
+{% endif %}
+
+{% log result %}
+
+{% assign lineItemList = array %}
+
+{% for lineItemEdge in result.data.order.lineItems.edges %}
+  {% assign lineItem = lineItemEdge.node %}
+  {% assign stock = lineItem.variant.inventoryItem.inventoryLevel.quantities %}
+
+  {% assign available = nil %}
+  {% for qty in stock %}
+    {% assign available = qty.quantity %}
+  {% endfor %}
+
+  {% assign oldQuantity = available | plus: lineItem.quantity %}
+
+  {% if available >= 0 %}
+    {% assign availability = "IN STOCK" %}
+  {% else %}
+    {% if available <= -1 and oldQuantity >= 1 %}
+      {% assign availability = "ISPO" %}
+    {% else %}
+      {% assign availability = "PRE-ORDER" %}
+    {% endif %}
+  {% endif %}
+
+  {% assign lineItemList[lineItemList.size] = lineItem.sku | append: ': ' | append: availability %}
+{% endfor %}
+
+{% capture starting_availabilities %}
+{% for item in lineItemList %}{{item}}
+{% endfor %}
+{% endcapture %}
+
+{% action "shopify" %}
+mutation {
+  orderUpdate(
+    input: {
+      id: {{ order.admin_graphql_api_id | json }}
+      metafields: [
+        {
+          namespace: "custom",
+          key: "starting_availabilities",
+          type: "multi_line_text_field",
+          description: "Availabilities for each line item when the order was placed."
+          value: {{ starting_availabilities | strip | json }}
+        }
+      ]
+    }
+  ) {
+    userErrors {
+      field
+      message
+    }
+  }
+}
+{% endaction %}
