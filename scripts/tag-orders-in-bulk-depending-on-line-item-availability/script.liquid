@@ -8,10 +8,11 @@
 {% comment %}
   MARK: OPTIONS ARRANGEMENT
   {{ options.location_id__number_required }}
-  {{ options.search_query_for_orders }}
   {{ options.ignore_orders_with_these_tags__array }}
   {{ options.sku_exceptions__array }}
 {% endcomment %}
+
+{% assign search_query = "status:open (fulfillment_status:on_hold OR fulfillment_status:unfulfilled OR fulfillment_status:partial)" %}
 
 {% # Scheduler for midday; don't need scheduler for daily because this is already subscribed. %}
 {% if event.topic contains 'mechanic/scheduler/daily' %}
@@ -36,7 +37,7 @@
     query {
       orders(
         first: 250
-        query: {{ options.search_query_for_orders | default: "" | json }}
+        query: {{ search_query | default: "" | json }}
         after: {{ cursor | json }}
       ) {
         pageInfo {
