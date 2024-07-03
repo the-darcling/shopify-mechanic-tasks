@@ -1,0 +1,217 @@
+{% # schedule the delay %}
+{% if event.topic == 'shopify/orders/create' %}
+  {% action "event" %}
+    {
+      "topic": "user/orders/availability",
+      "data": {
+        "order_id": {{ order.id | json }}
+      },
+      "run_at": {{ "now" | date: "%s" | plus: 86400 | json }},
+      "task_id": {{ task.id | json }}
+      }
+  {% endaction %}
+{% endif %}
+
+{% # run this after the delay %}
+{% if event.topic == 'user/orders/availability' %}
+  {% assign skipOrder = nil %}
+
+  {% # define the preview event %}
+  {% if event.preview %}
+    {% assign order = hash %}
+    {% assign order["name"] = "#00000" %}
+    {% assign order["email"] = "raqui@endlesspens.com" %}
+    {% assign order["customer"] = hash %}
+    {% assign order["customer"]["first_name"] = "Raqui" %}
+
+    {% assign line_items = array %}
+
+    {% assign line_item = hash %}
+    {% assign line_item["sku"] = "111-11111" %}
+    {% assign line_item["quantity"] = 1 %}
+    {% assign line_item["fulfillable_quantity"] = 1 %}
+    {% assign line_item["name"] = "Raqui's Fountain Pen - Extra Fine" %}
+    {% assign line_item["fulfillment_status"] = "partial" %}
+    {% assign line_items[line_items.size] = line_item %}
+
+    {% assign order["line_items"] = line_items %}
+
+    {% assign note_attributes = array %}
+
+    {% assign attribute = hash %}
+    {% assign attribute["name"] = "111-11111" %}
+    {% assign attribute["value"] = -1 %}
+    {% assign note_attributes[note_attributes.size] = attribute %}
+
+    {% assign order["note_attributes"] = note_attributes %}
+  {% else %}
+    {% # do this if it's not a preview %}
+    {% assign order = shop.orders[event.data.order_id] %}
+  {% endif %}
+
+  {% # check if there are any MPS items from order, sets the skip boolean to true if there are any %}
+  {% for item in order.line_items %}
+    {% if item.title contains '[MPS]' %}
+      {% assign skipOrder = true %}
+      {% break %}
+    {% endif %}
+  {% endfor %}
+
+  {% # this is to make sure the order's fulfillment status isn't completely fulfilled or cancelled. EDIT: this also makes sure that only orders not being skipped are being ran by the automation. %}
+  {% if order.fulfillment_status != 'fulfilled' and order.cancelled_at == null and skipOrder == nil %}
+    {% # do this if test mode! %}
+    {% if options.test_mode__boolean == true %}
+      {% if options.staff_email_recipients__array != blank %}
+        {% assign email_recipients = options.staff_email_recipients__array %}
+      {% endif %}
+
+    {% else %}
+      {% # do this if NOT test mode %}
+      {% assign email_recipients = order.email %}
+      {% if options.staff_email_recipients__array != blank %}
+        {% assign email_bcc = options.staff_email_recipients__array %}
+      {% endif %}
+    {% endif %}  
+  
+    {% # start making the line items list for the email %}
+    {% assign line_items_list = array %}
+  
+    {% # check the attributes for on-hand qtys %}
+    {% for attribute in order.note_attributes %}
+      {% assign availabilities = array %}
+      {% assign sku = attribute.name %}
+      {% assign on_hand = attribute.value | times: 1 %}
+      {% assign ordered_qty = nil %}
+      {% assign title = nil %}
+    
+      {% # loop through the line items %}
+      {% for line_item in order.line_items %}
+        {% # remember to check the correct sku! %}
+        {% if sku != line_item.sku %}
+          {% continue %}
+        {% endif %}
+
+        {% # variable aliases %}
+        {% assign title = line_item.name %}
+        {% assign ordered_qty = line_item.quantity %}
+        {% assign fulfillable_qty = line_item.fulfillable_quantity %}
+        {% assign fulfillment_status = line_item.fulfillment_status %}
+
+        {% # assign all the values first %}
+        {% assign qty_shipped = 0 %}
+        {% assign qty_in_stock = 0 %}
+        {% assign qty_pre_order = 0 %}
+
+        {% # then, figure out what the numbers mean, and reassign the values %}
+        {% if fulfillment_status %}
+          {% assign qty_shipped = ordered_qty | minus: fulfillable_qty %}
+        {% else %}
+          {% assign fulfillable_qty = ordered_qty %}
+        {% endif %}
+
+        {% if on_hand < 0 %}
+          {% assign on_hand = 0 %}
+        {% endif %}
+
+        {% assign qty_in_stock = on_hand | at_most: fulfillable_qty %}
+        {% assign qty_pre_order = fulfillable_qty | minus: on_hand | at_least: 0 %}
+
+        {% # and then if any of the values are 0, don't show them anymore %}
+        {% if qty_shipped != 0 %}
+          {% assign availabilities[availabilities.size] = qty_shipped | append: " Shipped" %}
+        {% endif %}
+
+        {% if qty_in_stock != 0 %}
+          {% assign availabilities[availabilities.size] = qty_in_stock | append: " In Stock" %}
+        {% endif %}
+
+        {% if qty_pre_order != 0 %}
+          {% assign availabilities[availabilities.size] = qty_pre_order | append: " Pre-Order" %}
+        {% endif %}
+      {% endfor %}
+    
+      {% # check if it's actually a sku; if it is, include it in the list for the email %}
+      {% unless sku contains 'tier'
+      or sku contains 'locksmith'
+      or sku contains 'sra' %}
+        {% assign line_item_avl = hash %}
+        {% assign line_item_avl["title"] = title %}
+        {% assign line_item_avl["sku"] = sku %}
+        {% assign line_item_avl["qty"] = on_hand %}
+        {% assign line_item_avl["ordered_qty"] = ordered_qty %}
+        {% assign line_item_avl["availabilities"] = availabilities %}
+        {% assign line_items_list[line_items_list.size] = line_item_avl %}
+      {% endunless %}
+    {% endfor %}
+    
+    {% # here it is: email subject! %}
+    {% capture email_subject %}
+      [UPDATE: {{ order.name }}] Availability of your items!
+    {% endcapture %}
+    
+    {% # and the body, where the magic happens %}
+    {% capture email_body %}
+      {% if options.test_mode__boolean == true %}
+        <div style="border: 1px solid grey; color: grey; padding: 15px; border-radius: 3px;">
+          <strong>TESTING PHASE:</strong>
+          This email is being sent to you because it is in the testing phase! Please tell Raqui on <a href="https://3.basecamp.com/5539926/buckets/31085772/todos/6725305049">Basecamp</a> if you see anything behaving weirdly, or if you'd like to change something for the customer's sake.<br>
+          <br>
+          Some stuff to look out for are strange formatting behaviors, incorrect availabilities (In Stock appearing as Pre-Order for example), incorrect quantities, and anything else you see that makes us look unprofessional.<br>
+          <br>
+          This email should also send out ONE DAY after the order has been placed, to make sure that Mechanic does its tagging run correctly on the order. It should also NOT send out when an order is completely fulfilled. ♡
+        </div>
+  
+        <p>&nbsp;</p>
+      {% endif %}
+  
+      <p>Hello {{ order.customer.first_name | default: 'there' }}!</p>
+    
+      {{ options.introduction_letter__multiline }}
+    
+      <p>&nbsp;</p>
+    
+      <div style="padding: 0 30px 0 30px;">
+        <p style="color: grey;">ORDER {{ order.name }}</p>
+        {% for line_item in line_items_list %}
+          {% assign qty = line_item.ordered_qty %}
+          {% assign title = line_item.title %}
+          {% assign availabilities = line_item.availabilities %}
+
+          <strong>{{ qty }} x {{ title }}</strong><br>
+
+          {% assign avl_size = availabilities.size %}
+          {% assign count = 0 %}
+          {% for availability in availabilities %}
+            {% assign count = count | plus: 1 %}
+            <small style="color: {% if availability contains "In Stock" %}#00c472{% elsif availability contains "Pre-Order" %}#c47200{% else %}grey{% endif %}">{{ availability | upcase }}{% if count < avl_size %}, {% endif %}</small>
+          {% endfor %}
+
+          <hr>
+        {% endfor %}
+      </div>
+
+      <p>&nbsp;</p>
+
+      <p>If you have any questions, reply to this email or contact us at <a href="mailto:sales@endlesspens.com">sales@endlesspens.com</a>.</p>
+    
+      <p>&nbsp;</p>
+    {% endcapture %}
+    
+    {% # send the email! %}
+    {% if line_items_list.size > 0 and email_recipients %}
+      {% action "email" %}
+      {
+        "to": {{ email_recipients | json }},
+        {% if email_bcc != blank %}
+          "bcc": {{ email_bcc | json }},
+        {% endif %}
+        "subject": {{ email_subject | json }},
+        "body": {{ email_body | json }},
+        "reply_to": {{ shop.customer_email | json }},
+        "from_display_name": {{ shop.name | json }},
+        "template": "Customer Email"
+      }
+      {% endaction %}
+    {% endif %}
+  {% endif %}
+{% endif %}
