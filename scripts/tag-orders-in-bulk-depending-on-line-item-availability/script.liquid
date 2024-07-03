@@ -12,6 +12,11 @@
   {{ options.sku_exceptions__array }}
 {% endcomment %}
 
+{% assign pre_order_tag = 'Pre-Order' %}
+{% assign in_stock_tag = 'In Stock' %}
+{% assign ispo_tag = 'ISPO' %}
+{% assign special_pre_order_tag = 'Special PO' %}
+
 {% assign search_query = "status:open (fulfillment_status:on_hold OR fulfillment_status:unfulfilled OR fulfillment_status:partial)" %}
 
 {% # Scheduler for midday; don't need scheduler for daily because this is already subscribed. %}
@@ -226,17 +231,17 @@
   {% assign tags_to_add = array %}
 
   {% if has_ispo %}
-    {% assign tags_to_add[tags_to_add.size] = 'ISPO' %}
+    {% assign tags_to_add[tags_to_add.size] = ispo_tag %}
   {% elsif has_is and has_po %}
-    {% assign tags_to_add[tags_to_add.size] = 'ISPO' %}
+    {% assign tags_to_add[tags_to_add.size] = ispo_tag %}
   {% elsif has_is %}
-    {% assign tags_to_add[tags_to_add.size] = 'In Stock' %}
+    {% assign tags_to_add[tags_to_add.size] = in_stock_tag %}
   {% elsif has_po %}
-    {% assign tags_to_add[tags_to_add.size] = 'Pre-Order' %}
+    {% assign tags_to_add[tags_to_add.size] = pre_order_tag %}
   {% endif %}
 
   {% if has_spo %}
-    {% assign tags_to_add[tags_to_add.size] = 'Special PO' %}
+    {% assign tags_to_add[tags_to_add.size] = special_pre_order_tag %}
   {% endif %}
 
   {% # Manages the endlog entries for troubleshooting purposes. %}
